@@ -647,6 +647,94 @@
             });
         }
 
+        // ATR values for different instruments (approximate values)
+        const atrValues = {
+            'EURUSD': 0.0015,
+            'GBPUSD': 0.0018,
+            'USDJPY': 1.2,
+            'XAUUSD': 25.0,
+            'BTCUSD': 2500,
+            'US30': 350,
+            'NAS100': 180,
+            'AUDUSD': 0.0012,
+            'NZDUSD': 0.0014,
+            'USDCAD': 0.0016,
+            'USDCHF': 0.0014,
+            'EURJPY': 1.8,
+            'GBPJPY': 2.1
+        };
+
+        // Calculate dynamic SL/TP based on entry and instrument
+        function calculateSLTP(symbol, entry, signalType) {
+            const atr = atrValues[symbol] || 0.001; // Default ATR if symbol not found
+            const entryPrice = parseFloat(entry);
+            
+            let sl, tp;
+            
+            if (signalType === 'LONG') {
+                sl = entryPrice - (atr * 1.5); // 1.5x ATR below entry
+                tp = entryPrice + (atr * 4.5); // 4.5x ATR above entry (1:3 RR)
+            } else { // SHORT
+                sl = entryPrice + (atr * 1.5); // 1.5x ATR above entry
+                tp = entryPrice - (atr * 4.5); // 4.5x ATR below entry (1:3 RR)
+            }
+            
+            // Round to appropriate decimal places
+            const decimals = getDecimalPlaces(symbol);
+            
+            return {
+                sl: parseFloat(sl.toFixed(decimals)),
+                tp: parseFloat(tp.toFixed(decimals))
+            };
+        }
+        
+        // Get appropriate decimal places for different instruments
+        function getDecimalPlaces(symbol) {
+            if (symbol.includes('JPY')) return 3;
+            if (symbol.includes('XAU') || symbol.includes('GOLD')) return 2;
+            if (symbol.includes('BTC')) return 1;
+            if (symbol.includes('US30') || symbol.includes('NAS100')) return 1;
+            return 5; // Default for major forex pairs
+        }
+
+        // Calculate Risk in USD
+        function calculateRiskUSD(symbol, entry, sl, lotSize) {
+            const entryPrice = parseFloat(entry);
+            const slPrice = parseFloat(sl);
+            const size = parseFloat(lotSize);
+            
+            if (!entryPrice || !slPrice || !size) return 0;
+            
+            const priceDiff = Math.abs(entryPrice - slPrice);
+            let riskUSD = 0;
+            
+            // Calculate risk based on instrument type
+            if (symbol.includes('USD') && !symbol.includes('BTC')) {
+                // Forex pairs - standard lot calculation
+                if (symbol.startsWith('USD')) {
+                    // USD base (USDJPY, USDCHF, etc)
+                    riskUSD = (priceDiff / entryPrice) * size * 100000;
+                } else {
+                    // USD quote (EURUSD, GBPUSD, etc)
+                    riskUSD = priceDiff * size * 100000;
+                }
+            } else if (symbol.includes('XAU') || symbol.includes('GOLD')) {
+                // Gold - per ounce
+                riskUSD = priceDiff * size * 100;
+            } else if (symbol.includes('BTC')) {
+                // Bitcoin
+                riskUSD = priceDiff * size;
+            } else if (symbol.includes('US30') || symbol.includes('NAS100')) {
+                // Indices - per point
+                riskUSD = priceDiff * size * 1;
+            } else {
+                // Default calculation
+                riskUSD = priceDiff * size * 10;
+            }
+            
+            return Math.round(riskUSD);
+        }
+
         // Load Trades from Google Sheets
         async function loadTradesFromSheet() {
             try {
@@ -665,13 +753,32 @@
                         headers.forEach((header, index) => {
                             trade[header.trim()] = values[index] ? values[index].trim() : '';
                         });
-                        if (trade.Symbol) {
+                        
+                        if (trade.Symbol && trade.Entry_Price) {
+                            // Calculate correct SL/TP if they are missing or incorrect (0/1)
+                            const slPrice = parseFloat(trade.SL_Price);
+                            const tpPrice = parseFloat(trade.TP_Price);
+                            
+                            if (!slPrice || slPrice <= 1 || !tpPrice || tpPrice <= 1) {
+                                console.log(`Calculating SL/TP for ${trade.Symbol} - Original SL: ${trade.SL_Price}, TP: ${trade.TP_Price}`);
+                                
+                                const calculated = calculateSLTP(trade.Symbol, trade.Entry_Price, trade.Signal_Type);
+                                trade.SL_Price = calculated.sl.toString();
+                                trade.TP_Price = calculated.tp.toString();
+                                
+                                // Recalculate Risk USD with correct values
+                                const riskUSD = calculateRiskUSD(trade.Symbol, trade.Entry_Price, trade.SL_Price, trade.Lot_Size || '0.1');
+                                trade.Risk_USD = riskUSD.toString();
+                                
+                                console.log(`Fixed ${trade.Symbol}: Entry=${trade.Entry_Price}, SL=${trade.SL_Price}, TP=${trade.TP_Price}, Risk=${riskUSD}`);
+                            }
+                            
                             trades.push(trade);
                         }
                     }
                 }
                 
-                console.log('Loaded trades:', trades);
+                console.log('Loaded and processed trades:', trades);
                 updateDashboard();
             } catch (error) {
                 console.error('Error loading trades:', error);
@@ -679,23 +786,33 @@
             }
         }
 
-        // Load Demo Data
+        // Load Demo Data with calculated SL/TP
         function loadDemoData() {
-            trades = [
-                {
-                    Timestamp: '2025-01-17T14:30:00',
-                    Symbol: 'EURUSD',
-                    Signal_Type: 'LONG',
-                    Entry_Price: '1.0845',
-                    SL_Price: '1.0825',
-                    TP_Price: '1.0905',
-                    Lot_Size: '0.1',
-                    Status: 'Open',
-                    P_L: '+170',
-                    Risk_USD: '200',
-                    Session: 'London'
-                }
-            ];
+            const demoTrade = {
+                Timestamp: '2025-01-17T14:30:00',
+                Symbol: 'EURUSD',
+                Signal_Type: 'LONG',
+                Entry_Price: '1.0845',
+                SL_Price: '0', // Will be calculated
+                TP_Price: '1', // Will be calculated
+                Lot_Size: '0.1',
+                Status: 'Open',
+                P_L: '+0',
+                Risk_USD: '0',
+                Session: 'London'
+            };
+            
+            // Calculate correct SL/TP for demo
+            const calculated = calculateSLTP(demoTrade.Symbol, demoTrade.Entry_Price, demoTrade.Signal_Type);
+            demoTrade.SL_Price = calculated.sl.toString();
+            demoTrade.TP_Price = calculated.tp.toString();
+            
+            // Calculate risk
+            const riskUSD = calculateRiskUSD(demoTrade.Symbol, demoTrade.Entry_Price, demoTrade.SL_Price, demoTrade.Lot_Size);
+            demoTrade.Risk_USD = riskUSD.toString();
+            
+            trades = [demoTrade];
+            console.log('Demo trade with calculated SL/TP:', demoTrade);
             updateDashboard();
         }
 
@@ -790,11 +907,11 @@
                 row.innerHTML = `
                     <td class="symbol">${trade.Symbol}</td>
                     <td class="signal-${trade.Signal_Type.toLowerCase()}">${trade.Signal_Type}</td>
-                    <td>${parseFloat(trade.Entry_Price).toFixed(5)}</td>
-                    <td>${parseFloat(trade.SL_Price).toFixed(5)}</td>
-                    <td>${parseFloat(trade.TP_Price).toFixed(5)}</td>
+                    <td>${parseFloat(trade.Entry_Price).toFixed(getDecimalPlaces(trade.Symbol))}</td>
+                    <td>${parseFloat(trade.SL_Price).toFixed(getDecimalPlaces(trade.Symbol))}</td>
+                    <td>${parseFloat(trade.TP_Price).toFixed(getDecimalPlaces(trade.Symbol))}</td>
                     <td>${trade.Lot_Size}</td>
-                    <td class="pnl-${pl >= 0 ? 'positive' : 'negative'}">${pl >= 0 ? '+' : ''}$${pl}</td>
+                    <td class="pnl-${pl >= 0 ? 'positive' : 'negative'}">${pl >= 0 ? '+' : ''}${pl}</td>
                     <td><span class="status-${trade.Status.toLowerCase()}">${trade.Status}</span></td>
                     <td>
                         ${trade.Status === 'Open' ? `
